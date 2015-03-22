@@ -1,0 +1,169 @@
+---
+title: 'Machine Learning: Course Project'
+author: "Igor Kuznetsov"
+output: html_document
+---
+
+## Executive Summary 
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+  
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+library(ggplot2)
+library(caret)
+library(RCurl)
+library(rpart)
+library(adabag)
+library(randomForest)
+library(parallel)
+library(doSNOW)
+
+cl <- makeCluster(detectCores() - 1, type = "SOCK")
+registerDoSNOW(cl)
+
+```
+
+### Loading and cleaning data
+
+First all the data was loaded to the corresponding variables and the seed was set to ensure reproducibility.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+training_url <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+evaluation_url <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+raw_training <- read.csv(text = training_url, na.strings=c("NA","#DIV/0!",""))
+evaluation <- read.csv(text = evaluation_url, na.strings=c("NA","#DIV/0!",""))
+rm(training_url); rm(evaluation_url)
+
+training <- raw_training
+
+set.seed(0)
+
+```
+
+Then I decided to clean the data starting with changing the types of the values to numeric. After that I made a summary of the columns in training dataset that contained NA values. The summary showed that these NA values could be omitted because even the 3rd quantile contained 19220 NA values. So most of these columns contained too little of non-NA values to be taken into consideration.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+for(i in 8:159) { training[,i] <- as.numeric(training[,i])}
+for(i in 8:159) { evaluation[,i] <- as.numeric(evaluation[,i])}
+
+nasums <- colSums(is.na(training))
+summary(nasums)
+```
+
+After that I removed the columns that contained NA values, the first 7 columns that contained metadata and the columns that contained highly correlated columns. All transformations were applied both to training and evaluation data sets.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+training <- training[,nasums==0]
+evaluation <- evaluation[,nasums==0]
+
+training <- training[,-(1:7)]
+evaluation <- evaluation[,-(1:7)]
+
+highcorr <- findCorrelation(cor(training[, -53]), cutoff=0.9)
+training <- training[, -highcorr]
+evaluation <- evaluation[, -highcorr]
+
+nearZeroVar(training)
+
+```
+
+Then I ensured that there were no columns with near zero variance in the training data set.
+
+### Splitting and preprocessing data
+
+Training data set was split to 90% training and 10% testing data set.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+inTrain <- createDataPartition(y=training$classe, p=0.9, list=FALSE)
+testing <- training[-inTrain,]
+training <- training[inTrain,]
+
+```
+
+## Modelling
+
+Now a good model needed to be selected. I was choosing between: General Linear model, Bayes model, Linear Discriminant Analysis model, Bagging model, Boosting model, Random Forests and Rpart method.
+
+Well, first of all, I couldn't make work the GLM model, the Bayes model and the LDA model as the `predict()` function output some strange errors saying that "the type must be either raw or prop". I decided that it was something with the tuning and switched to other models.
+
+```{r, echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+
+glmmodel <- train(classe ~ ., method="glm", data=training)
+
+bayesmodel <- train(classe ~ ., data=training, method="nb")
+bayespredict <- predict(bayesmodel, testing, type = "class")
+
+ldamodel <- train(classe ~ ., data=training, method="lda")
+ldapredict <- predict(ldamodel, testing, type = "class")
+
+```
+
+For the next models I calculated predictions on the testing set, built the confidence matrix to calculate the accurasy and measured the `system.time()` that was taken to build the model.
+
+It happened that the Rpart model took **2.4 seconds** to be built and showed **71% accuracy**. Not bad!
+
+```{r, echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+dtree <- rpart(classe ~ ., data=training)
+dtreepredict <- predict(dtree, newdata=testing, type = "class")
+confusionMatrix(testing$classe, dtreepredict)
+
+```
+
+The Bagging model took **22.7 seconds** to be built and showed only **55% accuracy**. Very poor result. But I must admit that if I had time to tune it, I probably could get better results.
+
+```{r, echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+
+bagmodel <- train(classe ~ ., data=training, method="rpart")
+bagpredict <- predict(bagmodel, newdata=testing)
+confusionMatrix(testing$classe, bagpredict)
+
+```
+
+I build the Boosting model with 5, 50, 100 and 500 iterations. Well, it took it **really long time** to be built (I could even take a walk) and showed **92.19% accuracy**. The result is good, but the computation time taken was too much!
+
+```{r, echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+
+boostmodel <- boosting(classe ~. , data=training, mfinal=500)
+boostpredict <- predict(boostmodel, testing, type = "class")
+confusionMatrix(testing$classe, boostpredict$class)
+```
+
+Finally the Random Forests model was built in about **50.2 seconds** and showed **99.69% accuracy**. The result is great. The Kappa statistic takes into account the **expected error rate** across the resampling results. So this model was chosen finally due to good results for Accuracy, Error rate and Speed.
+  
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+randfor <- randomForest(classe ~. , data=training)
+randforpredict <- predict(randfor, testing, type = "class")
+confusionMatrix(testing$classe, randforpredict)$overall
+
+```
+
+### Submitting Results
+
+Then I ran the prediction algorithm on the evaluation model. And finally the results were submitted to Coursera.
+
+```{r, echo=TRUE, eval=FALSE}
+
+evalpredict <- predict(randfor, evaluation, type = "class")
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(evalpredict)
+
+```
+
+This project proved that the characteristics of different prediction algorithms vary really high for the data sets with large amount of columns and samples. It was a great experience!
